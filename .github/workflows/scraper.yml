@@ -6,54 +6,68 @@ on:
     - cron: "0 0 * * 0"  # Weekly on Sunday
 
 jobs:
-  generate-matrix:
+  scrape-all:
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    timeout-minutes: 360  # 6 hours max
+    
     steps:
       - uses: actions/checkout@v4
-      - id: set-matrix
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Scrape all data (55 commodities × 28 states × 10 years)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
         run: |
-          MATRIX=$(jq -c '{commodity: [.vegetables, .fruits, .leafy_greens, .cereals] | add, state: .states, year: ["2015","2016","2017","2018","2019","2020","2021","2022","2023","2024"]}' config/commodities.json config/states.json)          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-
-  scrape:
-    needs: generate-matrix
-    runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 100  # Run 100 jobs in parallel
-      fail-fast: false
-      matrix: ${{fromJson(needs.generate-matrix.outputs.matrix)}}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Scrape data
-        run: python scrapers/agmarknet_worker.py "${{ matrix.commodity }}" "${{ matrix.state }}" "${{ matrix.year }}"
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: data-${{ matrix.year }}-${{ matrix.commodity }}-${{ matrix.state }}
-          path: artifacts/${{ matrix.year }}/*.parquet
-          retention-days: 7
-
-  merge-upload:
-    needs: scrape
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
-      - name: Merge and upload to Hugging Face
+          echo "Starting CropFresh AgriData Scraper - Matrix Mode"
+          echo "Target: 15,400 combinations (55 commodities × 28 states × 10 years)"
+          
+          # Read commodities and states
+          COMMODITIES=$(cat config/commodities.json | jq -r '[.vegetables, .fruits, .leafy_greens, .cereals] | add | .[]')
+          STATES=$(cat config/states.json | jq -r '.states[]')
+          YEARS=("2015" "2016" "2017" "2018" "2019" "2020" "2021" "2022" "2023" "2024")
+          
+          # Initialize counters
+          TOTAL=0
+          SUCCESS=0
+          FAILED=0
+          
+          # Create output directory
+          mkdir -p scraped_data
+          
+          # Loop through all combinations
+          for COMMODITY in $COMMODITIES; do
+            for STATE in $STATES; do
+              for YEAR in "${YEARS[@]}"; do
+                TOTAL=$((TOTAL + 1))
+                echo "[$TOTAL/15400] Processing: $COMMODITY | $STATE | $YEAR"
+                
+                # Run scraper
+                if python scrapers/agmarknet_worker.py "$COMMODITY" "$STATE" "$YEAR"; then
+                  SUCCESS=$((SUCCESS + 1))
+                else
+                  FAILED=$((FAILED + 1))
+                  echo "⚠️  Failed: $COMMODITY | $STATE | $YEAR"
+                fi
+                
+                # Progress report every 100 combinations
+                if [ $((TOTAL % 100)) -eq 0 ]; then
+                  echo "📊 Progress: $TOTAL/15400 | ✅ Success: $SUCCESS | ❌ Failed: $FAILED"
+                fi
+              done
+            done
+          done
+          
+          echo "\n🎉 Scraping Complete!"
+          echo "Total: $TOTAL | Success: $SUCCESS | Failed: $FAILED"
+      
+      - name: Upload to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
