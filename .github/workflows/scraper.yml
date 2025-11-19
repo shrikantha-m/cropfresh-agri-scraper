@@ -1,0 +1,61 @@
+name: AgriData Matrix Scraper
+
+on:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    - cron: "0 0 * * 0"  # Weekly on Sunday
+
+jobs:
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set-matrix
+        run: |
+          MATRIX=$(jq -c '{commodity: [.vegetables, .fruits, .leafy_greens, .cereals] | add, state: .states.states, year: ["2015","2016","2017","2018","2019","2020","2021","2022","2023","2024"]}' config/commodities.json config/states.json)
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  scrape:
+    needs: generate-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 100  # Run 100 jobs in parallel
+      fail-fast: false
+      matrix: ${{fromJson(needs.generate-matrix.outputs.matrix)}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Scrape data
+        run: python scrapers/agmarknet_worker.py "${{ matrix.commodity }}" "${{ matrix.state }}" "${{ matrix.year }}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-${{ matrix.year }}-${{ matrix.commodity }}-${{ matrix.state }}
+          path: artifacts/${{ matrix.year }}/*.parquet
+          retention-days: 7
+
+  merge-upload:
+    needs: scrape
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: Merge and upload to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+        run: python manager_upload.py
